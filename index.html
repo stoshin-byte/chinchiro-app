@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ちんちろスコアボード</title>
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-100 text-slate-800 min-h-screen">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+
+    // 賭け金リストの生成
+    const BET_OPTIONS = [];
+    for (let i = 100; i <= 1000; i += 100) BET_OPTIONS.push(i);
+    for (let i = 1500; i <= 5000; i += 500) BET_OPTIONS.push(i);
+    for (let i = 6000; i <= 10000; i += 1000) BET_OPTIONS.push(i);
+    for (let i = 15000; i <= 20000; i += 5000) BET_OPTIONS.push(i);
+
+    // 役リスト定義
+    const HAND_LIST = [
+      { id: "SHOMBEN", name: "しょんべん", rank: -100, multKey: "normal" },
+      { id: "HIFUMI", name: "ヒフミ", rank: -10, multKey: "hifumi" },
+      { id: "MENNASHI", name: "役なし", rank: 0, multKey: "normal" },
+      { id: "ME_1", name: "１の目", rank: 1, multKey: "normal" },
+      { id: "ME_2", name: "２の目", rank: 2, multKey: "normal" },
+      { id: "ME_3", name: "３の目", rank: 3, multKey: "normal" },
+      { id: "ME_4", name: "４の目", rank: 4, multKey: "normal" },
+      { id: "ME_5", name: "５の目", rank: 5, multKey: "normal" },
+      { id: "ME_6", name: "６の目", rank: 6, multKey: "normal" },
+      { id: "SHIGORO", name: "シゴロ", rank: 80, multKey: "shigoro" },
+      { id: "ARASHI", name: "アラシ", rank: 90, multKey: "zorome" },
+      { id: "PINZORO", name: "ピンゾロ", rank: 100, multKey: "pinzoro" },
+    ];
+
+    const STORAGE_KEY = "CHINCHIRO_GAME_DATA_V7";
+
+    function App() {
+      const savedData = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null");
+
+      const [phase, setPhase] = useState(savedData?.phase || "COUNT");
+      const [playerCount, setPlayerCount] = useState(savedData?.playerCount || 4);
+      const [playerNames, setPlayerNames] = useState(savedData?.playerNames || []);
+      const [rules, setRules] = useState(savedData?.rules || { 
+        pinzoro: 5, zorome: 3, shigoro: 2, hifumi: -2, normal: 1
+      });
+      const [players, setPlayers] = useState(savedData?.players || []);
+      const [parentId, setParentId] = useState(savedData?.parentId || 0);
+      const [savedBets, setSavedBets] = useState(savedData?.savedBets || {});
+      
+      // 各プレイヤーのスキップ状態を永続保持するState { [playerId]: true/false }
+      const [savedSkips, setSavedSkips] = useState(savedData?.savedSkips || {});
+
+      const [childInputs, setChildInputs] = useState(savedData?.childInputs || {});
+      const [parentHandId, setParentHandId] = useState(savedData?.parentHandId || "ME_1");
+      const [lastResult, setLastResult] = useState(savedData?.lastResult || null);
+
+      useEffect(() => {
+        const dataToSave = {
+          phase, playerCount, playerNames, rules, players, parentId, savedBets, savedSkips, childInputs, parentHandId, lastResult
+        };
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(dataToSave));
+      }, [phase, playerCount, playerNames, rules, players, parentId, savedBets, savedSkips, childInputs, parentHandId, lastResult]);
+
+      const handleResetAll = () => {
+        if (confirm("ゲームデータをリセットして最初からやり直しますか？")) {
+          localStorage.removeItem(STORAGE_KEY);
+          setPhase("COUNT");
+          setPlayerCount(4);
+          setPlayerNames([]);
+          setPlayers([]);
+          setParentId(0);
+          setSavedBets({});
+          setSavedSkips({});
+          setChildInputs({});
+          setParentHandId("ME_1");
+          setLastResult(null);
+        }
+      };
+
+      const handleSetCount = () => {
+        const names = Array.from({ length: playerCount }, (_, i) => `プレイヤー${i + 1}`);
+        setPlayerNames(names);
+        setPhase("NAMES");
+      };
+
+      const movePlayer = (index, direction) => {
+        const targetIndex = index + direction;
+        if (targetIndex < 0 || targetIndex >= playerNames.length) return;
+        const newNames = [...playerNames];
+        const temp = newNames[index];
+        newNames[index] = newNames[targetIndex];
+        newNames[targetIndex] = temp;
+        setPlayerNames(newNames);
+      };
+
+      const handleStartGame = () => {
+        const initialPlayers = playerNames.map((name, id) => ({ id, name, score: 0 }));
+        const initialBets = {};
+        const initialSkips = {};
+        initialPlayers.forEach(p => {
+          initialBets[p.id] = 100;
+          initialSkips[p.id] = false;
+        });
+
+        setPlayers(initialPlayers);
+        setSavedBets(initialBets);
+        setSavedSkips(initialSkips);
+        setParentId(0);
+        initRound(initialPlayers, 0, initialBets, initialSkips);
+        setPhase("GAME");
+      };
+
+      // ラウンド初期化（過去の賭け金・スキップ状態を保持）
+      const initRound = (currentPlayers, pId, currentBets, currentSkips) => {
+        const nextInputs = {};
+        currentPlayers.forEach((p) => {
+          if (p.id !== pId) {
+            const bet = currentBets[p.id] || 100;
+            const skip = currentSkips[p.id] || false;
+            nextInputs[p.id] = { bet: bet, handId: "ME_1", skip: skip };
+          }
+        });
+        setChildInputs(nextInputs);
+        setParentHandId("ME_1");
+      };
+
+      // 手動で親をパスして次へ
+      const handleSkipParent = () => {
+        const nextParentId = (parentId + 1) % players.length;
+        setParentId(nextParentId);
+        initRound(players, nextParentId, savedBets, savedSkips);
+      };
+
+      // 親のスキップ状態を解く（復帰）ボタン
+      const handleUnskipParent = () => {
+        const updatedSkips = { ...savedSkips, [parentId]: false };
+        setSavedSkips(updatedSkips);
+      };
+
+      // 子のデータ更新（スキップ切り替え時に savedSkips を更新）
+      const updateChildInput = (id, field, value) => {
+        if (field === "bet") {
+          const numValue = Number(value);
+          setSavedBets((prev) => ({ ...prev, [id]: numValue }));
+        }
+        if (field === "skip") {
+          setSavedSkips((prev) => ({ ...prev, [id]: value }));
+        }
+        setChildInputs((prev) => ({
+          ...prev,
+          [id]: { ...prev[id], [field]: value }
+        }));
+      };
+
+      const handleCalculate = () => {
+        const parentHandObj = HAND_LIST.find((h) => h.id === parentHandId);
+        const pMultRaw = rules[parentHandObj.multKey] || 1;
+        const pMult = Math.abs(pMultRaw) > 0 ? Math.abs(pMultRaw) : 1;
+
+        let parentDiffTotal = 0;
+        const childResults = [];
+
+        const updatedPlayers = players.map((p) => {
+          if (p.id === parentId) return p;
+
+          const input = childInputs[p.id];
+          if (input.skip) {
+            childResults.push({ name: p.name, text: "スキップ", diff: 0 });
+            return p;
+          }
+
+          const childHandObj = HAND_LIST.find((h) => h.id === input.handId);
+          const cMultRaw = rules[childHandObj.multKey] || 1;
+          const cMult = Math.abs(cMultRaw) > 0 ? Math.abs(cMultRaw) : 1;
+          const bet = Number(input.bet);
+          let diff = 0;
+          let resultText = "";
+
+          // 親がしょんべんの場合の特殊ルール
+          if (parentHandObj.id === "SHOMBEN") {
+            if (childHandObj.id === "SHOMBEN") {
+              diff = -bet * 1;
+              resultText = `両者しょんべん・親勝ち (${childHandObj.name} × 1倍)`;
+            } else if (childHandObj.rank > 0) {
+              const mult = cMult > 0 ? cMult : 1;
+              diff = bet * mult;
+              resultText = `勝ち (${childHandObj.name} × ${mult}倍)`;
+            } else {
+              diff = bet * 1;
+              resultText = `勝ち (親しょんべん・等倍獲得)`;
+            }
+          } 
+          // 通常の勝敗計算
+          else {
+            if (childHandObj.rank > parentHandObj.rank) {
+              diff = bet * cMult;
+              resultText = `勝ち (${childHandObj.name} × ${cMult}倍)`;
+            } else if (childHandObj.rank < parentHandObj.rank) {
+              let totalMult = pMult;
+              if (childHandObj.id === "HIFUMI") {
+                totalMult = pMult * cMult;
+              } else if (childHandObj.id === "SHOMBEN") {
+                totalMult = pMult * 1;
+              }
+              diff = -bet * totalMult;
+              resultText = `負け (${childHandObj.name} × ${totalMult}倍)`;
+            } else {
+              diff = -bet * pMult;
+              resultText = `同点・親勝ち (${childHandObj.name} × ${pMult}倍)`;
+            }
+          }
+
+          parentDiffTotal -= diff;
+          childResults.push({ name: p.name, bet, text: resultText, diff });
+          return { ...p, score: p.score + diff };
+        });
+
+        const finalPlayers = updatedPlayers.map((p) =>
+          p.id === parentId ? { ...p, score: p.score + parentDiffTotal } : p
+        );
+
+        setPlayers(finalPlayers);
+        setLastResult({
+          parentName: players[parentId].name,
+          parentHandName: parentHandObj.name,
+          parentDiffTotal,
+          childResults,
+        });
+        setPhase("RESULT");
+      };
+
+      const handleNextRound = () => {
+        const nextParentId = (parentId + 1) % players.length;
+        setParentId(nextParentId);
+        initRound(players, nextParentId, savedBets, savedSkips);
+        setPhase("GAME");
+      };
+
+      // 現在の親がスキップ状態かどうか
+      const isParentSkipped = !!savedSkips[parentId];
+
+      return (
+        <div className="max-w-2xl mx-auto p-4">
+          <div className="flex justify-between items-center mb-6">
+            <h1 className="text-2xl font-bold text-red-700">🎲 チンチロ スコアボード</h1>
+            {phase !== "COUNT" && (
+              <button onClick={handleResetAll} className="text-xs bg-slate-200 hover:bg-slate-300 px-2 py-1 rounded text-slate-600 font-bold">
+                最初からやり直す
+              </button>
+            )}
+          </div>
+
+          {/* 1. 人数設定 */}
+          {phase === "COUNT" && (
+            <div className="bg-white p-6 rounded-xl shadow space-y-4">
+              <h2 className="text-lg font-bold border-b pb-2">1. 参加人数の設定（最大15人）</h2>
+              <div className="flex items-center gap-4">
+                <label className="font-bold">人数:</label>
+                <select
+                  value={playerCount}
+                  onChange={(e) => setPlayerCount(Number(e.target.value))}
+                  className="border p-2 rounded text-lg font-bold"
+                >
+                  {Array.from({ length: 14 }, (_, i) => i + 2).map((num) => (
+                    <option key={num} value={num}>{num} 人</option>
+                  ))}
+                </select>
+              </div>
+
+              <h2 className="text-lg font-bold border-b pb-2 pt-4">2. 役の倍率設定</h2>
+              <p className="text-xs text-slate-500 mb-2">
+                ※親が倍率役かつ子がヒフミの場合、倍率は掛け算になります。<br/>
+                ※同点（同じ出目）は自動で親勝ちとなります。<br/>
+                ※スキップされたプレイヤーは手動で復帰するまでスキップが継続します。
+              </p>
+              <div className="grid grid-cols-2 gap-3 text-sm">
+                <label className="flex justify-between items-center"><span>ピンゾロ:</span><input type="number" className="border w-16 p-1 rounded text-right" value={rules.pinzoro} onChange={(e) => setRules({ ...rules, pinzoro: Number(e.target.value) })} /></label>
+                <label className="flex justify-between items-center"><span>アラシ (ゾロ目):</span><input type="number" className="border w-16 p-1 rounded text-right" value={rules.zorome} onChange={(e) => setRules({ ...rules, zorome: Number(e.target.value) })} /></label>
+                <label className="flex justify-between items-center"><span>シゴロ:</span><input type="number" className="border w-16 p-1 rounded text-right" value={rules.shigoro} onChange={(e) => setRules({ ...rules, shigoro: Number(e.target.value) })} /></label>
+                <label className="flex justify-between items-center"><span>ヒフミ:</span><input type="number" className="border w-16 p-1 rounded text-right" value={rules.hifumi} onChange={(e) => setRules({ ...rules, hifumi: Number(e.target.value) })} /></label>
+              </div>
+
+              <button onClick={handleSetCount} className="w-full bg-blue-600 text-white py-3 rounded-lg font-bold mt-4">
+                名前登録へ進む
+              </button>
+            </div>
+          )}
+
+          {/* 2. 名前入力 & 並び替え */}
+          {phase === "NAMES" && (
+            <div className="bg-white p-6 rounded-xl shadow space-y-4">
+              <h2 className="text-lg font-bold border-b pb-2">プレイヤー登録・並び替え（1番目が最初の親）</h2>
+              <p className="text-xs text-slate-500">※順番通りに親が交代していきます。</p>
+              <div className="space-y-2">
+                {playerNames.map((name, idx) => (
+                  <div key={idx} className="flex items-center gap-2 border p-2 rounded bg-slate-50">
+                    <span className="font-bold text-sm w-6">{idx + 1}.</span>
+                    <input
+                      type="text"
+                      className="border p-1 rounded flex-1"
+                      value={name}
+                      onChange={(e) => {
+                        const newNames = [...playerNames];
+                        newNames[idx] = e.target.value;
+                        setPlayerNames(newNames);
+                      }}
+                    />
+                    <button onClick={() => movePlayer(idx, -1)} disabled={idx === 0} className="px-2 py-1 bg-slate-200 rounded disabled:opacity-30">▲</button>
+                    <button onClick={() => movePlayer(idx, 1)} disabled={idx === playerNames.length - 1} className="px-2 py-1 bg-slate-200 rounded disabled:opacity-30">▼</button>
+                  </div>
+                ))}
+              </div>
+              <div className="flex gap-2 pt-2">
+                <button onClick={() => setPhase("COUNT")} className="w-1/3 border py-3 rounded-lg font-bold">戻る</button>
+                <button onClick={handleStartGame} className="w-2/3 bg-red-600 text-white py-3 rounded-lg font-bold">ゲームスタート</button>
+              </div>
+            </div>
+          )}
+
+          {/* 共通スコアボード */}
+          {phase !== "COUNT" && phase !== "NAMES" && (
+            <div className="bg-white p-4 rounded-xl shadow mb-6">
+              <h2 className="text-sm font-bold text-slate-500 mb-2">【累計スコア】</h2>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                {players.map((p) => {
+                  const isSkipped = !!savedSkips[p.id];
+                  return (
+                    <div key={p.id} className={`p-2 rounded border text-center relative ${
+                      p.id === parentId ? "border-red-500 bg-red-50 font-bold" : isSkipped ? "bg-slate-200 opacity-60" : "bg-slate-50"
+                    }`}>
+                      <div className="text-xs text-slate-500">
+                        {p.name} {p.id === parentId && "(親)"} {isSkipped && "[休]"}
+                      </div>
+                      <div className={`text-base ${p.score >= 0 ? "text-blue-600" : "text-red-600"}`}>
+                        {p.score > 0 ? `+${p.score}` : p.score} P
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* 3. ゲーム入力 */}
+          {phase === "GAME" && (
+            <div className="bg-white p-6 rounded-xl shadow space-y-6">
+              <div className="flex justify-between items-center border-b pb-3">
+                <h2 className="text-lg font-bold">
+                  親: <span className="text-red-600">{players[parentId]?.name}</span>
+                  {isParentSkipped && <span className="text-xs text-amber-600 ml-2">(現在スキップ中)</span>}
+                </h2>
+                <button onClick={handleSkipParent} className="bg-amber-500 hover:bg-amber-600 text-white text-xs px-3 py-2 rounded font-bold">
+                  親を飛ばす（スキップ）
+                </button>
+              </div>
+
+              {/* 親がスキップ状態の場合の案内バナー */}
+              {isParentSkipped ? (
+                <div className="bg-amber-50 border border-amber-200 p-4 rounded-lg text-center space-y-3">
+                  <p className="text-sm text-amber-800 font-bold">
+                    {players[parentId]?.name} はスキップ（お休み）中に設定されています。
+                  </p>
+                  <div className="flex gap-2 justify-center">
+                    <button onClick={handleUnskipParent} className="bg-blue-600 hover:bg-blue-700 text-white text-xs px-4 py-2 rounded font-bold">
+                      スキップから復帰する（ゲームに参加）
+                    </button>
+                    <button onClick={handleSkipParent} className="bg-slate-700 hover:bg-slate-800 text-white text-xs px-4 py-2 rounded font-bold">
+                      次の親へ進む ➔
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  {/* 子の入力 */}
+                  <div className="space-y-4">
+                    <h3 className="font-bold text-slate-600 text-sm">【子の賭け金・役選択】</h3>
+                    {players.filter((p) => p.id !== parentId).map((p) => {
+                      const input = childInputs[p.id] || { bet: savedBets[p.id] || 100, handId: "ME_1", skip: !!savedSkips[p.id] };
+                      return (
+                        <div key={p.id} className={`border p-3 rounded-lg ${input.skip ? "bg-slate-200 opacity-60" : "bg-slate-50"}`}>
+                          <div className="flex justify-between items-center mb-2">
+                            <span className="font-bold">{p.name} {input.skip && "(お休み中)"}</span>
+                            <label className="text-xs flex items-center gap-1 text-slate-600 cursor-pointer font-bold">
+                              <input
+                                type="checkbox"
+                                checked={input.skip}
+                                onChange={(e) => updateChildInput(p.id, "skip", e.target.checked)}
+                                className="w-4 h-4 accent-amber-600"
+                              />
+                              スキップ
+                            </label>
+                          </div>
+
+                          {!input.skip && (
+                            <div className="flex flex-wrap gap-3 items-center text-sm">
+                              <label className="flex items-center gap-1">
+                                <span>賭け金:</span>
+                                <select
+                                  className="border p-1 rounded font-bold bg-white"
+                                  value={input.bet}
+                                  onChange={(e) => updateChildInput(p.id, "bet", Number(e.target.value))}
+                                >
+                                  {BET_OPTIONS.map((val) => (
+                                    <option key={val} value={val}>{val.toLocaleString()} P</option>
+                                  ))}
+                                </select>
+                              </label>
+
+                              <label className="flex items-center gap-1">
+                                <span>役:</span>
+                                <select
+                                  className="border p-1 rounded font-bold bg-white"
+                                  value={input.handId}
+                                  onChange={(e) => updateChildInput(p.id, "handId", e.target.value)}
+                                >
+                                  {HAND_LIST.map((h) => (
+                                    <option key={h.id} value={h.id}>{h.name}</option>
+                                  ))}
+                                </select>
+                              </label>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* 親の役入力 */}
+                  <div className="border-t pt-4">
+                    <h3 className="font-bold text-slate-600 text-sm mb-2">【親の役選択】</h3>
+                    <div className="flex justify-center items-center gap-2">
+                      <span className="font-bold">{players[parentId]?.name}:</span>
+                      <select
+                        className="border-2 border-red-500 p-2 rounded-lg text-lg font-bold bg-white"
+                        value={parentHandId}
+                        onChange={(e) => setParentHandId(e.target.value)}
+                      >
+                        {HAND_LIST.map((h) => (
+                          <option key={h.id} value={h.id}>{h.name}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  <button onClick={handleCalculate} className="w-full bg-red-600 text-white py-3 rounded-lg font-bold text-lg shadow">
+                    勝敗を確定して結果を見る
+                  </button>
+                </>
+              )}
+            </div>
+          )}
+
+          {/* 4. 結果表示 */}
+          {phase === "RESULT" && lastResult && (
+            <div className="bg-white p-6 rounded-xl shadow space-y-4">
+              <h2 className="text-lg font-bold text-center border-b pb-2">【1まわり結果】</h2>
+              <p className="text-center text-sm font-bold">親 ({lastResult.parentName}) の役: <span className="text-red-600">{lastResult.parentHandName}</span></p>
+
+              <div className="divide-y">
+                {lastResult.childResults.map((res, idx) => (
+                  <div key={idx} className="py-2 flex justify-between items-center text-sm">
+                    <div>
+                      <div className="font-bold">{res.name}</div>
+                      <div className="text-xs text-slate-500">{res.text} {res.bet ? `/ 賭金:${res.bet}P` : ""}</div>
+                    </div>
+                    <div className={`font-bold ${res.diff > 0 ? "text-blue-600" : res.diff < 0 ? "text-red-600" : "text-slate-500"}`}>
+                      {res.diff > 0 ? `+${res.diff}` : res.diff} P
+                    </div>
+                  </div>
+                ))}
+                <div className="py-3 flex justify-between items-center font-bold bg-slate-100 px-2 rounded mt-2">
+                  <span>親 ({lastResult.parentName}) の総損益</span>
+                  <span className={lastResult.parentDiffTotal >= 0 ? "text-blue-600" : "text-red-600"}>
+                    {lastResult.parentDiffTotal > 0 ? `+${lastResult.parentDiffTotal}` : lastResult.parentDiffTotal} P
+                  </span>
+                </div>
+              </div>
+
+              <button onClick={handleNextRound} className="w-full bg-slate-800 text-white py-3 rounded-lg font-bold shadow">
+                次のまわりへ（親交代: {players[(parentId + 1) % players.length]?.name}）
+              </button>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
